@@ -10,5 +10,6 @@
 #include <AudioToolbox/AUParameters.h>
 
 typedef NS_ENUM(AUParameterAddress, AudioLabExtensionParameterAddress) {
-    octaveShift = 0
+    gain = 0,
+    octaveShift = 1
 };
