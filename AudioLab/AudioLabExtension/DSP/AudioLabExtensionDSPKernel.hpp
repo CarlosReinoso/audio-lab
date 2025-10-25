@@ -25,23 +25,16 @@ public:
         mInputChannelCount = inputChannelCount;
         mOutputChannelCount = outputChannelCount;
         
-        // Initialize granular synthesis buffers with improved settings
-        mBufferSize = (int)(mSampleRate * 2.0); // 2 second buffer for better quality
-        mGrainSize = (int)(mSampleRate * 0.05); // 50ms grain size for smoother transitions
-        mOverlap = 8; // 8x overlap for very smooth sound
-        
+        // Simple delay buffer for pitch shifting
+        mBufferSize = (int)(mSampleRate * 0.5); // 0.5 second buffer
         mDelayBuffers.resize(inputChannelCount);
         mWritePositions.resize(inputChannelCount);
-        mGrainPositions.resize(inputChannelCount);
-        mGrainCounters.resize(inputChannelCount);
-        mOutputBuffers.resize(inputChannelCount);
+        mReadPositions.resize(inputChannelCount);
         
         for (int channel = 0; channel < inputChannelCount; ++channel) {
             mDelayBuffers[channel].resize(mBufferSize, 0.0f);
-            mOutputBuffers[channel].resize(mGrainSize, 0.0f);
             mWritePositions[channel] = 0;
-            mGrainPositions[channel] = 0.0f;
-            mGrainCounters[channel] = 0;
+            mReadPositions[channel] = 0.0f;
         }
         
         // Calculate pitch shift ratios for all octave options
@@ -50,22 +43,12 @@ public:
         mPitchRatios[2] = 1.0;      // Normal (no shift)
         mPitchRatios[3] = 0.5;      // 1 octave down (read at half speed)
         mPitchRatios[4] = 0.25;     // 2 octaves down (read at quarter speed)
-        
-        // Initialize window function (Hann window)
-        mWindowSize = mGrainSize / mOverlap;
-        mWindow.resize(mWindowSize);
-        for (int i = 0; i < mWindowSize; ++i) {
-            mWindow[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (mWindowSize - 1)));
-        }
     }
     
     void deInitialize() {
         mDelayBuffers.clear();
         mWritePositions.clear();
-        mGrainPositions.clear();
-        mGrainCounters.clear();
-        mOutputBuffers.clear();
-        mWindow.clear();
+        mReadPositions.clear();
     }
     
     // MARK: - Bypass
@@ -80,6 +63,9 @@ public:
     // MARK: - Parameter Getter / Setter
     void setParameter(AUParameterAddress address, AUValue value) {
         switch (address) {
+            case AudioLabExtensionParameterAddress::gain:
+                mGain = value;
+                break;
             case AudioLabExtensionParameterAddress::octaveShift:
                 mOctaveShift = (int)value;
                 break;
@@ -90,6 +76,8 @@ public:
         // Return the goal. It is not thread safe to return the ramping value.
         
         switch (address) {
+            case AudioLabExtensionParameterAddress::gain:
+                return (AUValue)mGain;
             case AudioLabExtensionParameterAddress::octaveShift:
                 return (AUValue)mOctaveShift;
             default: 
@@ -148,78 +136,68 @@ public:
     
 private:
     void processChannel(const float* input, float* output, AUAudioFrameCount frameCount, int channel) {
+        // Safety check
+        if (channel >= mDelayBuffers.size() || mBufferSize == 0) {
+            // Fallback: pass through with gain
+            for (UInt32 frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
+                output[frameIndex] = input[frameIndex] * mGain;
+            }
+            return;
+        }
+        
         if (mOctaveShift == 2) {
             // Normal pitch (no shifting)
             for (UInt32 frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
-                output[frameIndex] = input[frameIndex];
+                output[frameIndex] = input[frameIndex] * mGain;
             }
         } else {
-            // Apply improved granular synthesis pitch shifting
+            // Apply simple pitch shifting
+            if (mOctaveShift < 0 || mOctaveShift >= 5) {
+                // Invalid octave shift, fallback to normal
+                for (UInt32 frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
+                    output[frameIndex] = input[frameIndex] * mGain;
+                }
+                return;
+            }
+            
             float pitchRatio = mPitchRatios[mOctaveShift];
             
             for (UInt32 frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
-                // Write input to delay buffer with anti-aliasing
-                float filteredInput = input[frameIndex];
-                mDelayBuffers[channel][mWritePositions[channel]] = filteredInput;
+                // Write input to delay buffer
+                mDelayBuffers[channel][mWritePositions[channel]] = input[frameIndex];
                 mWritePositions[channel] = (mWritePositions[channel] + 1) % mBufferSize;
                 
-                // Check if we need to generate a new grain
-                if (mGrainCounters[channel] <= 0) {
-                    generateGrain(channel, pitchRatio);
-                    mGrainCounters[channel] = mWindowSize;
+                // Read from delay buffer with pitch shifting
+                float readPosition = mReadPositions[channel];
+                int readIndex = (int)readPosition;
+                float fraction = readPosition - readIndex;
+                
+                // Ensure valid indices
+                if (readIndex < 0) readIndex += mBufferSize;
+                if (readIndex >= mBufferSize) readIndex -= mBufferSize;
+                
+                int readIndex2 = (readIndex + 1) % mBufferSize;
+                
+                // Linear interpolation
+                float sample1 = mDelayBuffers[channel][readIndex];
+                float sample2 = mDelayBuffers[channel][readIndex2];
+                float interpolatedSample = sample1 + fraction * (sample2 - sample1);
+                
+                // Apply gain and output
+                output[frameIndex] = interpolatedSample * mGain;
+                
+                // Update read position
+                mReadPositions[channel] += pitchRatio;
+                if (mReadPositions[channel] >= mBufferSize) {
+                    mReadPositions[channel] -= mBufferSize;
                 }
-                
-                // Output from current grain with improved windowing
-                int grainIndex = mWindowSize - mGrainCounters[channel];
-                float windowedSample = mOutputBuffers[channel][grainIndex] * mWindow[grainIndex];
-                
-                // Apply gentle compression to reduce artifacts
-                float compressedSample = tanh(windowedSample * 0.8f) * 1.2f;
-                output[frameIndex] = compressedSample;
-                
-                mGrainCounters[channel]--;
+                if (mReadPositions[channel] < 0) {
+                    mReadPositions[channel] += mBufferSize;
+                }
             }
         }
     }
     
-    void generateGrain(int channel, float pitchRatio) {
-        // Calculate read position for this grain with better positioning
-        int readStart = (mWritePositions[channel] - mGrainSize + mBufferSize) % mBufferSize;
-        
-        // Generate grain with improved pitch shifting
-        for (int i = 0; i < mGrainSize; ++i) {
-            float readPos = readStart + i * pitchRatio;
-            
-            // Handle wrap-around more carefully
-            while (readPos >= mBufferSize) readPos -= mBufferSize;
-            while (readPos < 0) readPos += mBufferSize;
-            
-            int readIndex = (int)readPos;
-            int readIndex2 = (readIndex + 1) % mBufferSize;
-            float fraction = readPos - readIndex;
-            
-            // Cubic interpolation for smoother sound
-            int readIndex0 = (readIndex - 1 + mBufferSize) % mBufferSize;
-            int readIndex3 = (readIndex + 2) % mBufferSize;
-            
-            float y0 = mDelayBuffers[channel][readIndex0];
-            float y1 = mDelayBuffers[channel][readIndex];
-            float y2 = mDelayBuffers[channel][readIndex2];
-            float y3 = mDelayBuffers[channel][readIndex3];
-            
-            // Cubic interpolation
-            float a = -0.5f * y0 + 1.5f * y1 - 1.5f * y2 + 0.5f * y3;
-            float b = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
-            float c = -0.5f * y0 + 0.5f * y2;
-            float d = y1;
-            
-            float interpolatedSample = a * fraction * fraction * fraction + 
-                                     b * fraction * fraction + 
-                                     c * fraction + d;
-            
-            mOutputBuffers[channel][i] = interpolatedSample;
-        }
-    }
     
     void handleParameterEvent(AUEventSampleTime now, AUParameterEvent const& parameterEvent) {
         setParameter(parameterEvent.parameterAddress, parameterEvent.value);
@@ -229,23 +207,18 @@ private:
     AUHostMusicalContextBlock mMusicalContextBlock;
     
     double mSampleRate = 44100.0;
+    double mGain = 1.0;
     int mOctaveShift = 2; // Default to "Normal" (index 2)
     bool mBypassed = false;
     AUAudioFrameCount mMaxFramesToRender = 1024;
     
-    // Improved granular synthesis variables
+    // Simple pitch shifting variables
     int mInputChannelCount = 2;
     int mOutputChannelCount = 2;
     int mBufferSize = 0;
-    int mGrainSize = 0;
-    int mOverlap = 8; // Increased overlap for smoother sound
-    int mWindowSize = 0;
     
     std::vector<std::vector<float>> mDelayBuffers;
-    std::vector<std::vector<float>> mOutputBuffers;
     std::vector<int> mWritePositions;
-    std::vector<float> mGrainPositions;
-    std::vector<int> mGrainCounters;
-    std::vector<float> mWindow;
+    std::vector<float> mReadPositions;
     float mPitchRatios[5]; // 0: 2 octaves up, 1: 1 octave up, 2: normal, 3: 1 octave down, 4: 2 octaves down
 };
