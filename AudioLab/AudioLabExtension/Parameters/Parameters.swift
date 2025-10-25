@@ -11,6 +11,14 @@ import AudioToolbox
 let AudioLabExtensionParameterSpecs = ParameterTreeSpec {
     ParameterGroupSpec(identifier: "global", name: "Global") {
         ParameterSpec(
+            address: .gain,
+            identifier: "gain",
+            name: "Output Gain",
+            units: .linearGain,
+            valueRange: 0.0...1.0,
+            defaultValue: 0.8
+        )
+        ParameterSpec(
             address: .octaveShift,
             identifier: "octaveShift",
             name: "Octave Shift",

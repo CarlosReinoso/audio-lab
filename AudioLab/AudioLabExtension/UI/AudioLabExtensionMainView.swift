@@ -23,10 +23,17 @@ struct AudioLabExtensionMainView: View {
     
     var body: some View {
         ZStack {
-            VStack(spacing: 25) {
+            VStack(spacing: 20) {
                 Text("Guitar Octave Shifter")
                     .font(.title2)
                     .fontWeight(.bold)
+                
+                // Gain control
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Output Gain")
+                        .font(.headline)
+                    ParameterSlider(param: parameterTree.global.gain)
+                }
                 
                 Text("Select Octave")
                     .font(.headline)
@@ -47,9 +54,9 @@ struct AudioLabExtensionMainView: View {
                                     .multilineTextAlignment(.center)
                             }
                             .frame(maxWidth: .infinity)
-                            .frame(height: 60)
+                            .frame(height: 50)
                             .background(
-                                RoundedRectangle(cornerRadius: 12)
+                                RoundedRectangle(cornerRadius: 10)
                                     .fill(parameterTree.global.octaveShift.value == AUValue(option.1) ? 
                                           Color.accentColor : Color.secondary.opacity(0.2))
                             )
